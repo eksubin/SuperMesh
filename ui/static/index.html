@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SmartMesh Twin Screen</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --text:#1c1f24; --muted:#6b7280; --line:#e2e5ea; --accent:#2563eb; --ok:#16a34a; --bad:#dc2626; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111418; --card:#1a1e24; --text:#e6e8eb; --muted:#9aa3af; --line:#2a303a; --accent:#60a5fa; --ok:#4ade80; --bad:#f87171; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; gap:12px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); background:var(--card); }
+  header h1 { font-size:17px; margin:0; flex:1; }
+  #status { font-size:13px; color:var(--muted); }
+  #status.ready { color:var(--ok); } #status.error { color:var(--bad); }
+  main { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:16px; max-width:1100px; margin:auto; }
+  @media (max-width:760px) { main { grid-template-columns:1fr; } }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; display:flex; flex-direction:column; gap:12px; }
+  .panel h2 { margin:0; font-size:15px; display:flex; gap:8px; align-items:center; }
+  select, input[type=text], button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:7px 10px; }
+  input[type=text] { flex:1; min-width:0; }
+  button { cursor:pointer; } button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .hint { font-size:12px; color:var(--muted); }
+  .box { border-top:1px solid var(--line); padding-top:10px; min-height:140px; max-height:360px; overflow:auto; display:flex; flex-direction:column; gap:8px; }
+  .msg { background:var(--bg); border-radius:8px; padding:8px 10px; }
+  .msg .meta { font-size:12px; color:var(--muted); margin-bottom:4px; }
+  .preview { max-width:160px; border:1px solid var(--line); border-radius:4px; image-rendering:auto; }
+  .msg img { max-width:100%; image-rendering:auto; border-radius:4px; } .msg audio { width:100%; }
+  .bar { height:6px; background:var(--line); border-radius:3px; overflow:hidden; } .bar > div { height:100%; background:var(--accent); }
+  .logwrap { max-width:1100px; margin:0 auto 24px; padding:0 16px; }
+  #log { margin-top:8px; background:var(--card); border:1px solid var(--line); border-radius:8px; height:300px; overflow:auto;
+         font:12px/1.5 ui-monospace, Menlo, monospace; padding:8px 10px; }
+  #log div { white-space:pre-wrap; } #log .t { color:var(--muted); }
+  #log .tx { color:var(--accent); } #log .rx { color:#d97706; } #log .ok { color:var(--ok); } #log .error { color:var(--bad); }
+  .rec { color:var(--bad); font-weight:600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SmartMesh Twin Screen</h1>
+  <span id="status">connecting…</span>
+</header>
+<main id="main"></main>
+<section class="logwrap">
+  <div class="row"><b>Event log</b><span class="hint">what happens after you click send</span>
+    <button id="clearLog">Clear</button><label class="hint"><input type="checkbox" id="follow" checked> follow</label></div>
+  <div id="log"></div>
+</section>
+
+<script>
+const MAX_IMG_SIDE = 96, IMG_QUALITY = 0.4, MAX_REC_SECONDS = 5, AUDIO_BPS = 6000;
+const panels = [{ node: 0 }, { node: 5 }];
+let nodes = 6, ready = false;
+
+const $ = (sel, el = document) => el.querySelector(sel);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function buildPanel(i) {
+  const p = panels[i], other = panels[1 - i];
+  const el = document.createElement('section');
+  el.className = 'panel';
+  el.innerHTML = `
+    <h2>Node <select class="node"></select> <span class="hint">sending to Node <b class="peer"></b></span></h2>
+    <div class="row"><input type="text" class="text" placeholder="Type a message"><button class="primary sendText">Send text</button></div>
+    <div class="row"><input type="file" class="file" accept="image/*"><button class="sendImg" disabled>Send image</button></div>
+    <div class="hint imgInfo"></div>
+    <img class="preview" hidden>
+    <div class="row"><button class="rec">● Record voice</button><button class="sendVoice" disabled>Send voice</button><span class="hint voiceInfo"></span></div>
+    <div class="outgoing"></div>
+    <div class="box sentbox"><span class="hint">Sent</span></div>
+    <div class="box inbox"><span class="hint">Inbox</span></div>`;
+  const sel = $('.node', el);
+  for (let n = 0; n < nodes; n++) sel.add(new Option(n, n));
+  sel.value = p.node;
+  sel.onchange = () => { p.node = +sel.value; refreshLabels(); render(lastState); };
+  p.el = el;
+
+  $('.sendText', el).onclick = async () => {
+    const t = $('.text', el).value.trim(); if (!t) return;
+    if (await send(p, other, 'text', { text: t })) $('.text', el).value = '';
+  };
+  $('.text', el).onkeydown = e => { if (e.key === 'Enter') $('.sendText', el).click(); };
+
+  // image: shrink to a tiny JPEG in the browser so it fits in a handful of radio packets
+  $('.file', el).onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    p.img = await shrinkImage(f);
+    $('.imgInfo', el).textContent = `Will send ${p.img.length} bytes (${Math.ceil(p.img.length / 180)} packets), ${MAX_IMG_SIDE}px max`;
+    $('.sendImg', el).disabled = false;
+    const pv = $('.preview', el); pv.src = 'data:image/jpeg;base64,' + b64(p.img); pv.hidden = false;
+  };
+  $('.sendImg', el).onclick = () => send(p, other, 'image', { data: b64(p.img) }, { mime: 'image/jpeg' });
+
+  // voice
+  $('.rec', el).onclick = () => toggleRecord(p);
+  $('.sendVoice', el).onclick = () => send(p, other, 'audio', { data: b64(p.voice) }, { mime: p.voiceMime });
+  return el;
+}
+
+async function shrinkImage(file) {
+  const bmp = await createImageBitmap(file);
+  const s = Math.min(1, MAX_IMG_SIDE / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(bmp.width * s)); c.height = Math.max(1, Math.round(bmp.height * s));
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', IMG_QUALITY));
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+async function toggleRecord(p) {
+  const el = p.el, btn = $('.rec', el);
+  if (p.recorder && p.recorder.state === 'recording') { p.recorder.stop(); return; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (e) { $('.voiceInfo', el).textContent = 'Microphone not available'; return; }
+  const opts = { audioBitsPerSecond: AUDIO_BPS };
+  if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) opts.mimeType = 'audio/webm;codecs=opus';
+  const rec = new MediaRecorder(stream, opts), parts = [];
+  p.recorder = rec;
+  rec.ondataavailable = e => parts.push(e.data);
+  rec.onstop = async () => {
+    clearTimeout(p.recTimer); stream.getTracks().forEach(t => t.stop());
+    btn.textContent = '● Record voice'; btn.classList.remove('rec-on');
+    p.voiceMime = rec.mimeType || 'audio/webm';
+    p.voice = new Uint8Array(await new Blob(parts).arrayBuffer());
+    $('.voiceInfo', el).textContent = `${p.voice.length} bytes (${Math.ceil(p.voice.length / 180)} packets)`;
+    $('.sendVoice', el).disabled = !p.voice.length;
+  };
+  rec.start();
+  btn.textContent = '■ Stop'; $('.voiceInfo', el).innerHTML = `<span class="rec">recording… max ${MAX_REC_SECONDS}s</span>`;
+  p.recTimer = setTimeout(() => rec.state === 'recording' && rec.stop(), MAX_REC_SECONDS * 1000);
+}
+
+const b64 = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s); };
+
+async function send(p, other, kind, body, extra = {}) {
+  if (p.node === other.node) { alert('Pick two different nodes'); return false; }
+  const r = await fetch('/api/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from_node: p.node, to_node: other.node, kind, ...body }) });
+  if (!r.ok) { alert((await r.json()).detail || 'Send failed'); return false; }
+  const { job } = await r.json();
+  (p.sent ||= []).push({ job, to: other.node, kind, text: body.text, data: body.data, mime: extra.mime, ts: Date.now() / 1000 });
+  poll.sig = null; render(lastState);
+  return true;
+}
+
+function refreshLabels() {
+  panels.forEach((p, i) => { $('.peer', p.el).textContent = panels[1 - i].node; });
+}
+
+let lastState = null;
+function render(s) {
+  if (!s) return;
+  panels.forEach(p => {
+    const jobs = s.jobs.filter(j => j.from === p.node).slice(-3);
+    $('.outgoing', p.el).innerHTML = jobs.map(j => `
+      <div class="hint">Sending ${j.kind} to Node ${j.to}: ${j.sent}/${j.total} packets (${j.status})</div>
+      <div class="bar"><div style="width:${100 * j.sent / j.total}%"></div></div>`).join('');
+    const jobById = Object.fromEntries(s.jobs.map(j => [j.id, j]));
+    $('.sentbox', p.el).innerHTML = '<span class="hint">Sent</span>' + (p.sent || []).slice().reverse().map(m => {
+      const j = jobById[m.job];
+      const st = j ? (j.status === 'sent' ? `all ${j.total} packets handed to the radio` : `${j.sent}/${j.total} packets (${j.status})`) : 'queued';
+      return `<div class="msg"><div class="meta">to Node ${m.to} · ${m.kind} · ${st} · ${new Date(m.ts * 1000).toLocaleTimeString()}</div>` +
+        (m.kind === 'text' ? esc(m.text)
+          : m.kind === 'image' ? `<img src="data:${m.mime};base64,${m.data}">`
+          : `<audio controls src="data:${m.mime};base64,${m.data}"></audio>`) + '</div>';
+    }).join('');
+    const inc = s.incoming.filter(x => x.to === p.node);
+    const box = $('.inbox', p.el);
+    const msgs = s.inbox.filter(m => m.to === p.node);
+    box.innerHTML = '<span class="hint">Inbox</span>' + inc.map(x => `<div class="hint">Receiving from Node ${x.from}: ${x.got}/${x.total} packets</div>
+      <div class="bar"><div style="width:${100 * x.got / x.total}%"></div></div>`).join('') +
+      msgs.slice().reverse().map(m => `<div class="msg"><div class="meta">from Node ${m.from} · ${m.kind} · ${m.size} bytes · ${new Date(m.ts * 1000).toLocaleTimeString()}</div>` +
+        (m.kind === 'text' ? esc(m.text)
+          : m.kind === 'image' ? `<img src="data:${m.mime};base64,${m.data}">`
+          : `<audio controls src="data:${m.mime};base64,${m.data}"></audio>`) + '</div>').join('');
+  });
+}
+
+let logSeq = 0;
+async function pollLog() {
+  try {
+    const events = await (await fetch('/api/log?since=' + logSeq)).json();
+    const box = $('#log');
+    for (const e of events) {
+      logSeq = e.seq;
+      const d = document.createElement('div');
+      d.className = e.level;
+      d.innerHTML = `<span class="t">${new Date(e.ts * 1000).toLocaleTimeString([], { hour12: false })}.${String(Math.floor(e.ts * 1000 % 1000)).padStart(3, '0')}</span> ${esc(e.msg)}`;
+      box.append(d);
+    }
+    if (events.length && $('#follow').checked) box.scrollTop = box.scrollHeight;
+  } catch (e) {}
+  setTimeout(pollLog, 700);
+}
+$('#clearLog').onclick = () => { $('#log').innerHTML = ''; };
+
+async function poll() {
+  try {
+    const s = await (await fetch('/api/state')).json();
+    lastState = s;
+    const st = $('#status'); st.className = s.status;
+    st.textContent = s.status === 'ready' ? `Mesh ready (${s.nodes} nodes)` : s.status === 'error' ? `Error: ${s.error}` : 'Booting simulator… (about 30 s)';
+    // keep the inbox scroll position and focused controls intact: only re-render when something changed
+    const sig = JSON.stringify([s.inbox.length, s.jobs, s.incoming, s.status, panels.map(p => (p.sent || []).length), panels.map(p => p.node)]);
+    if (sig !== poll.sig) { poll.sig = sig; render(s); }
+  } catch (e) { $('#status').textContent = 'backend unreachable'; }
+  setTimeout(poll, 1000);
+}
+
+const main = $('#main');
+panels.forEach((_, i) => main.append(buildPanel(i)));
+refreshLabels();
+poll();
+pollLog();
+</script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+services:
+  backend:
+    build: ./backend
+    environment:
+      MOCK_MESH: "1"            # set to "0" once app/pipeline.py is implemented
+      LOCAL_NODE: "Node 04"
+      MAX_UPLOAD_BYTES: "10485760"
+      # INTERNAL_TOKEN: "change-me"   # required header for POST /internal/events if set
+    volumes:
+      - uploads:/data/uploads
+    ports:
+      - "8000:8000"             # API + /internal/events for a separate pipeline service
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"               # open http://<host>:8080 on the iPhone
+
+volumes:
+  uploads:

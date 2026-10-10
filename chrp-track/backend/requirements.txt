@@ -1,0 +1,14 @@
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+python-multipart>=0.0.9
+Pillow>=10
+# Real mesh (MOCK_MESH=0) also needs the Meshtasticator dependencies: pip install -r ../../Meshtasticator/requirements.txt
+# Optional: the neural image codec (IMAGE_CODEC=neural, the default); without these images fall back to JPEG.
+torch
+torchvision
+compressai
+numpy
+# Neural voice codec (VOICE_CODEC=neural, the default):
+torchaudio
+encodec
+soundfile
