@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="chirp.png" alt="CHRP Track: Low Bandwidth, High Delivery." width="520">
+</p>
+
 # SmartMesh
 
 Send text, pictures and voice messages between simulated off-grid mesh radios, with neural compression so they fit in a
